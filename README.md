@@ -97,6 +97,8 @@ Curva di validazione (val/nll = NELBO per token, pesi EMA, 2048 sequenze di vali
 
 Ormai la curva scende di ~0,006 per epoca. Un fit a legge di potenza, solo indicativo, dà ≈ 3,38 a 50 epoche a LR costante. L'analisi completa è in [`docs/ANALISI.md`](docs/ANALISI.md): confronto con il paper, intervallo di mascheramento appreso, testa di soft masking, norme degli embedding (incluso `[MASK]`), salute del training, campioni.
 
+La [sezione 11](docs/ANALISI.md#11-il-ruolo-di-paralesn-e-dellattention-dentro-diesn) analizza il **ruolo di ParalESN** con misure dirette e ablazioni. I reservoir hanno una memoria di pochi token (emivita mediana 3,5 token). Fanno mescolamento locale nei blocchi bassi e centrali insieme alla convoluzione: senza di loro la NELBO sale di 0,49 nats. Il contesto lungo passa invece dall'unico strato di attention, che scrive la parte più grande della rappresentazione finale.
+
 > La riga ufficiale della tesi (PPL sull'intera validazione | MAUVE | tempo di addestramento | tempo di inferenza) non è stata calcolata prima della dismissione del server: si ottiene con `lightning/evaluate.py` sui pesi salvati (vedi sotto).
 
 ## Pesi

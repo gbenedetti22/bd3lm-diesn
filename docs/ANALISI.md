@@ -57,6 +57,16 @@ A parità di dati e di ricetta, la distanza dal paper ha tre cause che qui non s
 
 Separare il contributo dell'architettura da quello del soft masking richiede le due baseline allo stesso budget (`dit_bs16`, `diesn_bs16`), che non sono state addestrate. Solo come contesto: le run DiESN precedenti, basate sul codice SMDM di IBM con un'impostazione diversa, non erano mai scese sotto 3,7.
 
+**Si poteva battere 3,10? Con questa ricetta, molto difficilmente.**
+
+- **Il divario è grande.** 3,44 contro 3,10 sembrano numeri vicini, ma la NELBO è in scala logaritmica: 0,34 nats per token sono una perplexity più alta del 40% (31,0 contro 22,3). Il divario residuo è più grande di tutto il progresso fatto dall'epoca 1 all'epoca 17 (3,70 → 3,44, cioè 0,26).
+- **Il ritmo non basta.** Nelle ultime cinque epoche il guadagno è stato di circa 0,006 per epoca. Anche estrapolando in modo lineare, che è ottimistico perché la curva rallenta, servirebbero più di 50 epoche oltre le 18 fatte. Il fit a legge di potenza dà 3,37-3,38 a 50-60 epoche, e perfino il suo asintoto (3,20 ± 0,07) resta sopra 3,10.
+- **C'è un limite strutturale** (sezione 11). Il contesto lungo passa da un solo strato di attention, perché i reservoir hanno una memoria di pochi token. Il DiT del paper ha 12 strati di attention.
+- **Leve possibili, nessuna sufficiente da sola:**
+  - un decadimento finale del LR, che di solito vale pochi centesimi;
+  - reservoir con memoria più lunga (ρ vicino a 1);
+  - più strati di attention, che però avvicinerebbero DiESN a un Transformer.
+
 ## 4. Intervallo di mascheramento appreso
 
 BD3-LM sceglie a ogni validazione l'intervallo U[β, ω] delle frazioni di mascheramento che minimizza la varianza della NELBO. Qui la scelta è andata così:
@@ -113,7 +123,7 @@ Controlli su `step312000.ckpt` (`analysis/ckpt_analysis.py` e `analysis/directio
 - **Gradiente.** Norma RMS ≈ 0,19 nelle ultime ~1000 iterazioni (stimata dai momenti di Adam), sotto la soglia di clipping 1,0.
 - **Riga di uscita di `[MASK]`.** È esattamente 0, come deve: con SUBS il suo logit è −∞.
 - **Bias d'uscita.** I più alti sono `,` ` the` ` in` ` and`: il modello ha appreso le frequenze dei token.
-- **Gate AdaLN.** Il percorso ESN + conv dei blocchi è diventato molto più importante durante il training: |gate| da 0,1-0,8 allo step 25k a 0,6-2,0 allo step 312k, massimo nei blocchi centrali. Il gate dell'unico strato di attention è sceso da 1,25 a 0,48. Il modello ha spostato parte del lavoro dall'attention ai reservoir e alla convoluzione.
+- **Gate AdaLN.** Tra lo step 25k e il 312k il gate del ramo ESN + conv è cresciuto (|gate| da 0,1-0,8 a 0,6-2,0, massimo nei blocchi centrali), mentre quello dell'attention è sceso da 1,25 a 0,48. **Questo non vuol dire che il modello abbia spostato lavoro dall'attention ai reservoir.** Le misure dirette della sezione 11 mostrano il contrario: l'attention è diventata più importante, e il gate dell'ESN è cresciuto solo per compensare la crescita del flusso residuo.
 - **Direzione dei pesi.**
   - Il movimento degli ultimi ~10k step è ancora allineato alla traiettoria complessiva (coseno 0,23 su 144M di pesi; per direzioni casuali sarebbe ~0,0001), a circa metà della velocità media.
   - Gli aggiornamenti per step sono però dominati dal rumore: |m|/√v = 0,14-0,17, il livello del rumore puro.
@@ -138,3 +148,138 @@ Quattro sequenze da 1024 token dallo step 312k (pesi EMA, sampler first-hitting 
 3. **Decadimento finale del LR**, da applicare a tutte le run: è una deviazione dalla ricetta di BD3-LM.
 4. **Block size 4**, per il confronto con il miglior risultato del paper, dopo aver misurato il costo di DiESN con blocchi così piccoli.
 5. **KV cache per DiESN**, rimandata di proposito.
+
+## 11. Il ruolo di ParalESN (e dell'attention) dentro DiESN
+
+Per capire che cosa fa ogni componente non bastano i pesi. Servono due misure sui dati, fatte sullo step 312k (e per confronto sul 25k), con i pesi EMA e su sequenze di validazione di OpenWebText (ultimo shard del dataset, dentro gli ultimi 100k documenti). Script: `analysis/paralesn_role.py` e `analysis/depth_profiles.py`.
+
+- **Contributi.** Per ogni blocco, quanto è grande l'aggiornamento che ciascun ramo scrive nel flusso residuo, in rapporto alla norma del flusso che entra nel blocco. Si misura sia nella passata x0 (la sequenza pulita, cioè il contesto) sia nella passata x_t (le posizioni mascherate). Dati in `role_step*_contributions.csv`.
+- **Ablazioni.** Di quanto sale la NELBO togliendo un ramo, con gli stessi t e le stesse maschere. Dati in `role_step*_ablations.csv`. Ci sono due tipi di ablazione:
+  - *togliere il ramo*: la sua uscita diventa zero;
+  - *togliere solo il contesto tra blocchi*: il ramo continua a lavorare dentro il blocco, ma non riceve più nulla dai blocchi precedenti. Per l'ESN il reservoir forward riparte da zero a ogni blocco; per la conv le 2 posizioni prima del blocco diventano zero; per l'attention ogni blocco legge solo se stesso.
+
+  Il secondo tipo è più pulito del primo, perché il resto della rete continua a ricevere ingressi del tipo che si aspetta.
+
+### 11.1 La memoria dei reservoir è corta
+
+ParalESN è una ricorrenza lineare a coefficienti complessi, fissa: `h_t = λ ⊙ h_t-1 + u_t`. Ogni unità decade come |λ|^k. I 768 autovalori per direzione di ciascun blocco hanno |λ| ∈ [0,46, 0,91] (mediana 0,82), da `esn_rho_min` 0,4 e `esn_rho_max` 0,9. Quindi:
+
+- l'**emivita** di un'unità è in mediana **3,5 token** e al massimo 7,3;
+- dopo un blocco di 16 token resta al più il **22%** dello stato, in mediana il 4-5%.
+
+Il reservoir è quindi una banca fissa di filtri esponenziali e oscillanti con una memoria di pochi token: un **mescolatore locale**, non un modello del contesto lungo. In più non ha una proiezione d'uscita addestrabile: l'uscita passa per `tanh`, un mixer fisso e una matrice di merge fissa. Gli unici controlli addestrabili sono l'ampiezza dell'ingresso (LayerNorm + scale/shift di AdaLN) e il gate1, che l'ESN condivide con la convoluzione.
+
+### 11.2 Quanto scrive ogni ramo
+
+Rapporto |aggiornamento| / |flusso residuo entrante| allo step 312k:
+
+| | ESN (x0) | conv (x0) | MLP (x0) | ESN (x_t) | conv (x_t) | MLP (x_t) | norma del flusso entrante (x0) |
+|---|---|---|---|---|---|---|---|
+| blocco 0 | 0,14 | 0,59 | 1,93 | 0,25 | 0,54 | 2,44 | 3,9 |
+| blocco 1 | 0,13 | 0,41 | 0,62 | 0,22 | 0,52 | 0,52 | 9,2 |
+| blocco 2 | 0,09 | 0,26 | 0,33 | 0,12 | 0,28 | 0,28 | 14,3 |
+| blocco 5 | 0,10 | 0,16 | 0,25 | 0,09 | 0,14 | 0,18 | 23,4 |
+| blocco 8 | 0,06 | 0,17 | 0,31 | 0,07 | 0,15 | 0,21 | 34,9 |
+| blocco 11 | 0,03 | 0,11 | 1,17 | 0,03 | 0,06 | 0,39 | 45,4 |
+
+L'**attention**, dopo il blocco 11, ha un rapporto di **2,59** nella passata x0 e di **2,14** nella passata x_t; il flusso che riceve ha norma 80,3 nella passata x0.
+
+![contributi](../results/diesn_smdm_bs16/contributions_step312000.png)
+
+- **L'attention domina la rappresentazione finale.** L'unico strato di attention scrive un aggiornamento **2,1-2,6 volte più grande del flusso residuo** che riceve: dopo l'attention la rappresentazione è soprattutto quello che l'attention ha scritto.
+- **ESN e conv pesano poco, e sempre meno.** Il ramo ESN scrive il 3-25% del flusso, la convoluzione il 6-59%, e il peso relativo di entrambi scende con la profondità.
+- **ESN e conv si compensano.** Gli aggiornamenti dei due rami sono quasi sempre **anti-correlati** (coseno negativo fino a −0,5; positivo solo nel blocco 1): la convoluzione, che si addestra, corregge in parte le feature fisse dell'ESN.
+
+### 11.3 Che cosa succede togliendo i pezzi
+
+Aumento della NELBO (nats per token):
+
+| Ablazione | step 25k | step 312k |
+|---|---|---|
+| NELBO di riferimento | 3,651 | 3,387 |
+| senza ESN (tutti i blocchi) | +0,43 | **+0,49** |
+| senza convoluzione (tutti i blocchi) | +3,76 | +3,93 |
+| senza attention | +1,90 | **+2,93** |
+| senza MLP (tutti i blocchi) | +4,97 | +5,53 |
+| ESN senza contesto tra blocchi | +0,25 | +0,24 |
+| conv senza contesto tra blocchi (2 posizioni) | +0,38 | +0,41 |
+| attention senza contesto tra blocchi | +0,87 | +0,75 |
+| contesto portato solo dall'attention | +0,66 | +0,68 |
+| contesto portato solo dall'ESN | +1,09 | +1,08 |
+| nessun contesto tra blocchi | +1,07 | +1,13 |
+
+Per tutte le ablazioni di contesto il danno cresce con la frazione di mascheramento del blocco: per l'attention, allo step 312k, è +0,63 con t < 1/3 e +0,88 con t > 2/3. È atteso: più il blocco è mascherato, più conta ciò che arriva da fuori.
+
+![ablazioni per blocco](../results/diesn_smdm_bs16/ablations_per_block_step312000.png)
+
+Togliendo un solo ramo in un solo blocco (step 312k):
+
+| | ESN | conv | MLP |
+|---|---|---|---|
+| blocco 0 | +0,023 | **+0,214** | +0,160 |
+| blocco 2 | **+0,072** | +0,063 | +0,055 |
+| blocco 4 | **+0,061** | +0,058 | +0,064 |
+| blocco 5 | +0,046 | +0,066 | +0,064 |
+| blocco 8 | +0,035 | +0,035 | +0,079 |
+| blocco 10 | +0,005 | +0,009 | +0,098 |
+| blocco 11 | +0,001 | +0,006 | **+0,165** |
+
+### 11.4 Il ruolo di ParalESN
+
+- **È importante ma non dominante.** Senza tutti i reservoir la NELBO sale di 0,49 nats (perplexity da 30 a 48). È molto meno di quanto costa togliere conv, attention o MLP, ma non è trascurabile: il modello li usa.
+- **Lavora nei blocchi bassi e centrali.** Conta soprattutto nei blocchi 2-5 (fino a +0,07 ciascuno), che sono anche quelli dove il suo gate è più alto, ed è quasi inutile negli ultimi tre (+0,001-0,005). Le feature locali dei reservoir servono a costruire la rappresentazione nei primi strati. Poi il lavoro passa alle MLP e all'attention.
+- **È un mescolatore locale, complementare alla convoluzione.** Entrambi guardano pochi token, ma la convoluzione, che si addestra, fa la parte più grossa (aggiornamenti da 1,5 a 4 volte più grandi) e corregge l'uscita fissa dell'ESN. Che togliere tutte le convoluzioni sia catastrofico (+3,9) non dipende solo dall'informazione che portano: la rete si è adattata a ricevere la somma "ESN + correzione". Togliendo solo la correzione resta l'uscita grezza dei reservoir, che non si è mai vista da sola.
+- **Porta un po' di contesto tra blocchi, ma solo quello vicino.** Togliere il contesto dell'ESN, con conv e attention intatte, costa +0,24: il reservoir porta nelle prime posizioni del blocco gli ultimi token del blocco precedente, utili come contesto immediato. Da solo, però, l'ESN non basta: con il contesto portato solo dall'ESN si perde quasi quanto senza alcun contesto (+1,08 contro +1,13). Con una memoria di pochi token, dopo il confine di blocco resta troppo poco.
+- **Il contesto lungo è tutto dell'attention.** Con il contesto portato solo dall'attention si recupera quasi metà della perdita (+0,68 invece di +1,13). Quindi l'unico strato di attention è il collo di bottiglia del contesto lungo, e durante il training la sua importanza è **cresciuta**: senza attention si perdono +1,90 nats allo step 25k e +2,93 allo step 312k, e il suo aggiornamento relativo passa da 1,5 a 2,1-2,6.
+
+### 11.5 Perché il gate dell'ESN è salito e quello dell'attention è sceso
+
+Il gate di AdaLN non misura l'importanza di un ramo, a causa di una **simmetria di scala**. Quello che entra nel flusso residuo è il prodotto `gate × uscita del ramo`, e la stessa ampiezza si può ottenere con un gate grande e un'uscita piccola o viceversa. AdamW senza weight decay fa crescere i pesi durante il training, quindi anche il flusso residuo cresce: all'ingresso del blocco 5 passa da 14,9 a 23,4 tra lo step 25k e il 312k.
+
+- **Ramo ESN + conv.** L'uscita dell'ESN è limitata (`tanh`, mixer e merge fissi) e i pesi della convoluzione sono rimasti quasi alla norma iniziale (15-20). Per tenere lo stesso peso relativo in un flusso residuo che cresce, l'unica manopola è il **gate1**, che infatti è salito. Nel blocco 5 il gate1 passa da 1,2 a 3,0, ma l'aggiornamento relativo dell'ESN resta lo stesso (0,099 → 0,098).
+- **Attention e MLP.** Hanno matrici addestrabili che sono cresciute molto: `c_v` e `c_proj` circa 7,5 volte, la norma spettrale di W2 delle MLP di 3,5-5,5 volte. Così il loro gate è potuto scendere senza ridurre l'aggiornamento: per l'attention è anzi aumentato.
+
+In breve, la crescita del gate dell'ESN è una **compensazione**, non uno spostamento di lavoro. In termini di quello che viene scritto, e di quanto costa toglierlo, l'attention ha guadagnato importanza e l'ESN l'ha mantenuta.
+
+### 11.6 AdaLN dai blocchi bassi a quelli alti
+
+Senza condizionamento sul tempo (`time_conditioning=False`, quindi σ = 0) l'AdaLN non si adatta a nulla. È una costante appresa per blocco: per ogni canale uno shift, una scala e un gate, cioè l'equivalente dei parametri affini della LayerNorm più un *LayerScale*. Profilo allo step 312k, RMS sui canali (`depth_profiles.csv`, `depth_profiles.png`):
+
+| Blocco | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| gate1 (ESN + conv) | 0,91 | 1,29 | 1,05 | 1,87 | 1,93 | **3,01** | 2,02 | 2,42 | 2,27 | 1,54 | 1,50 | 1,11 |
+| gate2 (MLP) | 0,09 | 0,09 | 0,09 | 0,11 | 0,12 | 0,15 | 0,19 | 0,23 | 0,28 | 0,32 | 0,34 | **0,39** |
+| guadagno in ingresso a ESN/conv | **0,28** | 0,59 | 0,91 | 0,89 | 1,05 | 0,87 | 1,09 | 1,09 | 1,08 | 1,34 | 1,23 | 1,12 |
+| guadagno in ingresso all'MLP | 0,24 | 0,62 | 0,74 | 0,72 | 0,68 | 0,63 | 0,57 | 0,55 | 0,55 | 0,55 | 0,55 | 0,53 |
+
+Il guadagno in ingresso è `|peso della LayerNorm × (1 + scale)|`. Quello dell'attention è 2,13 e quello del layer d'uscita 2,30.
+
+![profili](../results/diesn_smdm_bs16/depth_profiles.png)
+
+- **gate1** sale fino al centro della rete (blocco 5) e poi scende: ha la stessa forma dell'importanza dell'ESN misurata con le ablazioni.
+- **gate2** cresce in modo monotono con la profondità, di 4,5 volte dal primo all'ultimo blocco. Durante il training è *sceso* a tutte le profondità (allo step 25k andava da 0,21 a 0,60), mentre i pesi delle MLP crescevano: è la stessa simmetria di scala.
+- **Il primo blocco attenua molto l'ingresso dei reservoir** (guadagno 0,28 contro ~1 nei blocchi successivi). Nel primo blocco i reservoir leggono l'embedding attenuato, e la parte grossa del lavoro la fanno la convoluzione e l'MLP.
+
+### 11.7 Le MLP con la profondità
+
+Nei Transformer pre-LN la norma del flusso residuo **cresce** con la profondità: ogni strato somma il proprio aggiornamento e nulla la riporta indietro. Gli strati più profondi scrivono quindi aggiornamenti più grandi in valore assoluto, per contare ancora su un flusso più grande. Qui succede lo stesso:
+
+- **Il flusso residuo cresce.** Nella passata x0 cresce di 11,5 volte nei 12 blocchi (da 3,9 a 45,4), poi l'ultima MLP lo porta a 80 e l'attention a 150.
+- **Gli aggiornamenti assoluti delle MLP crescono** dal blocco 2 in poi (4,7 → 5,9 → 10,8 → 15,0 → 52,9 per i blocchi 2, 5, 8, 10, 11), mentre quelli relativi seguono una U: 1,9 nel primo blocco, 0,2-0,35 al centro, 1,2 nell'ultimo.
+- **Il primo MLP riscrive quasi l'embedding**: aggiornamento doppio del flusso residuo, e togliere quel solo MLP costa +0,16. È un comportamento noto anche nei Transformer: in GPT-2 il primo MLP funziona di fatto come un'estensione dell'embedding.
+- **L'importanza delle MLP cresce con la profondità** dal blocco 1 in poi (+0,056 → +0,165), mentre ESN e conv perdono importanza: gli strati alti fanno soprattutto calcolo per token.
+- **Le norme dei pesi delle MLP**, invece, sono quasi uguali in tutti i blocchi: Frobenius ~222-233 per W1 e ~197-210 per W2, perché Adam aggiorna ogni coordinata con un passo simile. La norma spettrale di W2 addirittura **cala** con la profondità (da 25 a 15). La crescita degli aggiornamenti con la profondità non viene dai pesi ma dal **gate2** (×4,5) e dal flusso residuo, che cresce. Per confrontare gli strati conta il prodotto, non i pesi da soli.
+
+### 11.8 In sintesi
+
+In DiESN, dopo 18 epoche, i ruoli sono questi:
+
+- **Reservoir e convoluzione** fanno il mescolamento locale nei blocchi bassi e centrali. La convoluzione addestrata ha il ruolo principale e corregge le feature fisse dei reservoir, che restano utili (+0,49 nats se si tolgono).
+- **Le MLP** fanno il calcolo per token, sempre più importante salendo.
+- **L'unico strato di attention** porta il contesto lungo e scrive la parte più grande della rappresentazione finale.
+
+Il limite principale del design è che i reservoir, con |λ| ≤ 0,91, ricordano solo pochi token. Possibili esperimenti, da decidere e da confrontare con le baseline allo stesso budget:
+
+- **ρ più vicino a 1** (per esempio `esn_rho_max` 0,99, emivita ~70 token), per vedere se i reservoir iniziano a portare contesto tra blocchi;
+- **una proiezione d'uscita addestrabile per l'ESN**, che però cambia `diesn.py`;
+- **un secondo strato di attention a metà rete.**

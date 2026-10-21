@@ -13,4 +13,8 @@ Gli script usati per [`docs/ANALISI.md`](../docs/ANALISI.md). Si lanciano dalla 
 | `val_noise.py` | rumore di una validazione: stessi pesi, t e maschere diversi | `CKPT` |
 | `final_samples.py` | campioni da 1024 token (pesi EMA, sampler di BD3-LM) | `CKPT OUT.txt [N]` |
 | `weights_only.py` | copia "solo pesi" di un checkpoint (modello, EMA, configurazione), caricabile da `evaluate.py` | `CKPT OUT` |
+| `owt_val_tokens.py` | token di validazione di OpenWebText senza la cache completa: scarica l'ultimo shard parquet del dataset (dentro gli ultimi 100k documenti) e lo tokenizza come la pipeline | `DOWNLOAD_DIR OUT.npy [N_SEQ]` |
+| `depth_profiles.py` | profili per profondità dai pesi EMA di più checkpoint: AdaLN di ogni blocco (scale, shift, gate, guadagno d'ingresso), norme (Frobenius e spettrali) di MLP, attention e convoluzioni; memoria dei reservoir (modulo degli autovalori, emivita) | `OUT.csv CKPT [CKPT ...]` |
+| `paralesn_role.py` | ruolo di ParalESN e dell'attention: contributi di ogni ramo al flusso residuo per blocco; ablazioni (togliere ESN, conv, attention, MLP; togliere solo il contesto tra blocchi), anche blocco per blocco | `CKPT TOKENS.npy OUT_PREFIX [--per-block]` |
+| `plot_depth.py` | grafici di `depth_profiles.py` e `paralesn_role.py` | `RESULTS_DIR` |
 | `test_ckpt_callbacks.py` | test su CPU della logica dei checkpoint di `lightning/train.py` (ultimi 3 a step, uno a fine epoca, riprese senza duplicati) | nessuno |
