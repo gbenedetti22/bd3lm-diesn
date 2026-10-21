@@ -14,6 +14,27 @@ BD3-LM con backbone DiESN e soft masking SMDM, block size 16, su OpenWebText. La
 | Hardware | 4× A100 80GB PCIe, DDP, `torch.compile`; 0,734 h ogni 1000 step, cioè ~12,5 h per epoca |
 | Durata | 312.000 step, 164 miliardi di token, **229,5 h** di soli step di training (`TrainTimer`) |
 
+### Iperparametri di ParalESN
+
+I reservoir di DiESN sono configurati da `DiESNConfig` (`diffusion/config.py`). Per questa run `lightning/config.yaml` fissa solo `model.diesn.attn_impl: softmax`. `lightning/diesn_bd3.py` imposta `hidden_size`, `n_blocks`, `cond_dim`, `dropout`, `esn_n_units` = 768 ed `esn_n_heads` = 12 dalla sezione `model`. Gli altri campi hanno i default di `diffusion/config.py`. I valori qui sotto sono quelli salvati nella configurazione del checkpoint.
+
+| Parametro | Valore | Effetto (codice in `paralesn/`) |
+|---|---|---|
+| `esn_n_units` | 768 | unità complesse del reservoir, per blocco DiESN |
+| `esn_n_layers` | 1 | un reservoir per blocco |
+| `esn_bidirectional`, `esn_bid_merge` | True, `cat` | lo stesso reservoir è percorso in avanti e all'indietro; gli stati sono concatenati (2 × 768) |
+| `esn_n_heads` | 12 | le 768 unità sono divise in 12 "teste" da 64, ognuna con un intervallo di raggi spettrali crescente: la testa 0 ha modulo di λ tra 0,47 e 0,91, la testa 11 tra 0,87 e 0,91. Le teste basse sono veloci, quelle alte lente |
+| `esn_leaky` | 0,9 | autovalori `λ = (1 − a) + a·ρ·e^(iθ)`, con a = 0,9; ingresso `u_t = a·(x W_in + b)` |
+| `esn_rho_min`, `esn_rho_max` | 0,4, 0,9 | raggio ρ per unità (uniforme in ρ², per testa). Con il leaky il modulo di λ va da 0,46 a 0,91: memoria con emivita mediana 3,5 token (sezione 11.1) |
+| `esn_phase_min`, `esn_phase_max` | 0, π/16 (0,196 rad) | fase θ per unità. Con il leaky l'argomento di λ va da 0 a 0,17 rad: oscillazioni lente, con un periodo di almeno 36 token |
+| `esn_in_initialization` | `gamma` | W_in (768 × 768, complessa) ~ U(−1, 1), con la colonna dell'unità i scalata per √(1 − modulo(λ_i)²): ogni unità ha la stessa varianza stazionaria |
+| `esn_in_scaling` | 0,367 | **non usato**: conta solo con l'inizializzazione `uniform` |
+| bias del reservoir | U(−1, 1), complesso | `bias_scaling` = 1, default di `LinearReservoirConfig` |
+| `esn_mix_scaling` | 0,1 | mixer fisso da 1536 stati complessi (parte reale e immaginaria: 3072 valori) a 1536 uscite, seguito da `tanh`. 0,1 è la norma di Frobenius dell'**intera** matrice (elementi dell'ordine di 6,5e-5), con bias 0 (`mix_bias_scaling` = 0). L'uscita del ramo è quindi piccola e la `tanh` lavora quasi in modo lineare. Per questo, per pesare nel flusso residuo, il ramo ha bisogno di un gate1 grande (sezione 11.5) |
+| `merge_matr` (in `diesn.py`) | 1536 × 768, fissa | proiezione dal ramo ESN al flusso residuo, Kaiming uniforme (elementi in [−0,036, 0,036]) |
+
+Reservoir, mixer e `merge_matr` sono generati dal seed 1, sono uguali su tutte le GPU e non vengono mai addestrati. Sono salvati come buffer nei checkpoint: **85,0 milioni di valori reali** (7,08 milioni per blocco), contro 144 milioni di parametri addestrati. Gli unici controlli addestrabili del ramo ESN sono l'AdaLN (scala, shift e gate1) e la LayerNorm che precedono il reservoir.
+
 ## 2. Curva di validazione
 
 ![curva](../results/diesn_smdm_bs16/val_curve.png)
