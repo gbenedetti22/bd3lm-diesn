@@ -36,9 +36,9 @@ In un Transformer la maschera sta tutta nell'attention. **DiESN invece sposta l'
 ```mermaid
 flowchart LR
     X0["x0: blocchi puliti"] --> P0["passata x0<br/>(12 DiESNBlock + attention)"]
-    P0 -->|"contesto pulito:<br/>stato del reservoir a fine blocco b-1,<br/>2 posizioni prima del blocco,<br/>chiavi e valori dei blocchi < b"| PT
+    P0 -->|"contesto pulito:<br/>stato del reservoir a fine blocco b-1,<br/>2 posizioni prima del blocco,<br/>chiavi e valori dei blocchi precedenti"| PT
     XT["x_t: blocco rumoroso b<br/>(soft mask SMDM)"] --> PT["passata x_t<br/>(stessi pesi)"]
-    PT --> L["logit del blocco b<br/>SUBS: p(x0 | x_t, blocchi < b)"]
+    PT --> L["logit del blocco b<br/>SUBS: p(x0 dato x_t e i blocchi precedenti)"]
 ```
 
 La metà x0 si calcola una volta per step: è la passata pulita che BD3-LM aggiunge al training (Algoritmo 1 del paper). La metà x_t legge il contesto salvato. In campionamento basta una passata su `[blocchi puliti, blocco in denoising]`. I test (`lightning/test_bd3lm.py`) verificano quattro proprietà:
