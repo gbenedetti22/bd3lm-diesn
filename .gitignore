@@ -176,3 +176,10 @@ misc_internal/
 sample_logs/
 varlen_sample_logs/
 logs/
+
+# thesis project (BD3LM + DiESN)
+.uv_cache/
+runs/
+*.ckpt
+*.ckpt.part*
+.pytest_cache/

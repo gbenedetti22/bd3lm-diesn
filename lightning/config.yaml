@@ -1,0 +1,112 @@
+# BD3LM on OpenWebText with PyTorch Lightning (lightning/train.py, lightning/bd3lm.py).
+# The keys of the Hydra configuration of this repository that lightning/bd3lm.py reads, with the values of
+# configs/config.yaml, configs/algo/bd3lm.yaml, configs/model/small.yaml, configs/noise/loglinear.yaml,
+# configs/lr_scheduler/constant_warmup.yaml and scripts/train/train_owt_bd3lm.sh (OpenWebText, block size 16),
+# plus the DiESN backbone and the soft masking (marked "new").
+# Override from the command line with key=value, as with main.py:
+#   uv run python lightning/train.py name=dit_bs16 algo.backbone=dit
+
+name: bd3lm-owt                  # new: run name, output folder <out_dir>/<name> and wandb run
+out_dir: runs                    # new
+seed: 1
+mode: train
+block_size: 16                   # train_owt_bd3lm.sh
+
+model:                           # configs/model/small.yaml
+  length: 1024
+  hidden_size: 768
+  cond_dim: 128
+  n_blocks: 12
+  n_heads: 12                    # attention heads; diesn: also the reservoir heads (esn_n_heads)
+  dropout: 0.1
+  tie_word_embeddings: True
+  attn_backend: flex             # dit: training attention (train_owt_bd3lm.sh); sampling always uses sdpa
+  diesn:                         # new, diesn: other DiESNConfig fields (diffusion/config.py), e.g. esn_rho_max: 0.95
+    attn_impl: softmax           # the single attention layer: softmax (BD3LM's block_diff_mask); diesn.py default: gla
+
+algo:                            # configs/algo/bd3lm.yaml (+ train_owt_bd3lm.sh)
+  name: bd3lm
+  backbone: diesn                # new: diesn (lightning/diesn_bd3.py) / dit (models/dit.py)
+  parameterization: subs
+  time_conditioning: False
+  T: 5000                        # sampling steps per block (genppl_bd3lm.sh); first hitting stops after block_size
+  causal_attention: False
+  ignore_bos: True
+  cross_attn: True
+  var_min: True
+  clip_search_delta: 0.05
+  clip_search_widths: [0.5, 0.6, 0.7, 0.8, 0.9]  # train_owt_bd3lm.sh
+  fix_clipping: False
+  sampler: semi_ar
+  mdlm_loss_scale: False
+  soft_masking: none             # new, diesn: none / smdm (SMDM soft masking, lightning/bd3lm.py module docstring)
+  tran_head:                     # SMDM language/configs/algo/mdlm_sm.yaml: TransparencyHead initialization
+    init_scale: 0.0
+    init_centre: -0.75
+    init_steep: 6.66
+    mixinputs_k: 3
+
+noise:                           # configs/noise/loglinear.yaml
+  type: loglinear
+
+training:                        # configs/config.yaml (+ train_owt_bd3lm.sh)
+  ema: 0.9999
+  antithetic_sampling: True
+  sampling_eps: 1e-3
+  resample: True
+  sampling_eps_min: 1e-3
+  sampling_eps_max: 1.0
+  eval_nll: True
+
+sampling:                        # configs/config.yaml (+ genppl_bd3lm.sh)
+  nucleus_p: 0.9
+  first_hitting: True
+  kv_cache: False
+  var_length: False
+  num_sample_batches: 1
+
+eval:                            # configs/config.yaml (metrics.Metrics loads only the tokenizer of the gen-PPL model)
+  perplexity_batch_size: 8
+  gen_ppl_eval_model_name_or_path: gpt2-large
+
+optim:                           # configs/config.yaml
+  weight_decay: 0
+  lr: 3e-4
+  tran_head_lr: 1e-2             # SMDM OWT scripts (optim.tran_head_lr=0.01): learning rate of the TransparencyHead
+  sm_prob: 0.8                   # SMDM OWT scripts (optim.sm_prob=0.8): probability of soft masking in a training step
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1e-8
+
+lr_scheduler:                    # configs/lr_scheduler/constant_warmup.yaml
+  num_warmup_steps: 2500
+
+loader:                          # configs/config.yaml (+ train_owt_bd3lm.sh)
+  global_batch_size: 512
+  batch_size: 64                 # per GPU, the largest that fits in 80 GB with trainer.compile (32 without)
+  eval_batch_size: 32            # per GPU: validation; sampling batch in evaluate.py
+  num_workers: 8
+
+data:                            # new: OpenWebText of data/openwebtext.py (last 100k documents = validation)
+  val_tokens: 2097152            # validation during training: evenly spaced chunks (0: the whole split)
+
+trainer:                         # configs/config.yaml (lightning.Trainer), checkpoints configs/callbacks/
+  devices: -1                    # GPUs (-1: all visible)
+  compile: True                  # new: torch.compile of the per-token computation of the blocks (BD3LM.compile_backbone)
+  max_steps: 25000               # 25000 x 512 x 1024 = 13B tokens (BD3LM: 1M steps, 60 epochs); -1: no limit
+  max_epochs: null               # new: epochs of OpenWebText (~17k steps, 8.9B tokens each), with max_steps=-1
+  val_check_interval: 5000       # optimizer steps between validations
+  ckpt_every: 1000               # optimizer steps between checkpoints
+  ckpt_keep: 3                   # new: step checkpoints kept (the latest ones); last.ckpt links the latest
+  ckpt_epochs: -1                # new: end-of-epoch checkpoints kept (the latest ones; -1: all, 0: none)
+  gradient_clip_val: 1.0
+  log_every_n_steps: 50
+  num_sanity_val_steps: 2
+  progress_bar_refresh_rate: 10  # new: TQDM progress bar (shown in the wandb logs), updated every n micro-batches
+
+checkpointing:                   # configs/config.yaml
+  resume_ckpt_path: null         # checkpoint to resume from (e.g. an end-of-epoch one); null: checkpoints/last.ckpt
+
+wandb:                           # configs/config.yaml
+  project: BD3-LMs-DiESN
+  mode: online                   # online / offline / disabled
